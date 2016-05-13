@@ -1,0 +1,168 @@
+SET TERMINAL:HEIGHT TO 30.
+
+SET logs TO list(list(0,""),list(0,""),list(0,""),list(0,""),list(0,""),list(0,""),list(0,""),list(0,""),list(0,""),list(0,"")).
+SET lastTime TO 0.
+
+WHEN round(missiontime) - lastTime > 1 THEN {
+  SET lastTime TO round(missiontime).
+  PRINT "ALTITUDE: " + round(alt:radar) + "  " AT (0,0).
+  PRINT "SOLID: " + round(STAGE:SOLIDFUEL) + "  " AT (18,0).
+  PRINT "LIQUID: " + round(STAGE:LIQUIDFUEL) + "  " AT (33,0).
+
+  PRINT "Apoapsis: " + round(SHIP:APOAPSIS) + " " AT (0,1). // Far
+  PRINT "Periapsis: " + round(SHIP:PERIAPSIS) + " " AT (18,1). // Near
+
+  PRINT "Eta Apoa: " + round(ETA:APOAPSIS) + " " AT (0,2). // Far
+  PRINT "Eta Peri: " + round(ETA:PERIAPSIS) + " " AT (18,2). // Near
+
+  PRINT "STATUS: " + SHIP:STATUS + "     " AT (0,3).
+  PRINT "MASS: " + round(SHIP:MASS) + "  " AT (23,3).
+
+  PRINT "-----------------------[Log]----------------------" AT (0,18).
+  PRINT "[T+" + round(missiontime) + "]" AT (1,18).
+  FROM {local x is 20.} UNTIL x = 30 STEP {set x to x+1.} DO {
+    PRINT ")                                                (" AT (0,x-1).
+    IF logs[x-20][1] <> "" {
+      PRINT "T+" + logs[x-20][0] AT (2,x-1).
+      PRINT logs[x-20][1] AT (10,x-1).
+    }
+  }
+
+  RETURN true.
+}
+
+FUNCTION ADD_LOG {
+  PARAMETER text.
+  logs:REMOVE(0).
+  logs:ADD(list(round(missiontime),text)).
+}
+
+FUNCTION OUTPUT {
+  PARAMETER color.
+  PARAMETER text.
+  HUDTEXT(text,2,2,42,color,false).
+  ADD_LOG(text).
+}
+
+// the higher up the ship is, the more it is
+// pitched over
+FUNCTION GRAV_TURN {
+  PARAMETER st. // start turn
+  PARAMETER et. // end turn
+
+  SAS OFF.
+  SET ar TO alt:radar.
+
+  IF ar > st {
+    SET pda TO (-1*(sqrt(0.05*ar))).
+    SET pitchvector TO (R(0, pda, 0)*UP).
+    LOCK steering TO lookdirup(pitchvector:vector, SHIP:facing:topvector).
+  }
+  IF ar > et  {
+    LOCK steering TO lookdirup(PROGRADE:vector, SHIP:facing:topvector).
+    RETURN true.
+  }
+  RETURN false.
+}
+
+CLEARSCREEN.
+SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.
+
+
+SET mode TO 0.
+SET gtf TO false.  // Gravity turn finished
+SET srbf TO false. // SRB finished
+UNTIL mode = 99 {
+  // pre-launch
+  IF mode = 0 {
+    SET mode TO 1.
+    FROM {LOCAL countdown is 5.} UNTIL countdown = 0 STEP {SET countdown TO countdown - 1.} DO {
+        PRINT "T -" + countdown + " " AT (0, 1).
+        WAIT 1.
+    }
+    LOCK THROTTLE TO 1.
+    OUTPUT (GREEN,"SRB Start").
+    STAGE.
+  }
+
+  // launch
+  IF mode = 1 {
+    IF srbf = false AND STAGE:SOLIDFUEL < 0.1 {
+      SET srbf TO true.
+      OUTPUT(GREEN,"SRB Seperation").
+      STAGE.
+      WAIT 2.
+      OUTPUT(GREEN,"ME Start").
+      STAGE.
+    }
+
+    if gtf = false AND GRAV_TURN(1000, 105000) = true {
+      OUTPUT (GREEN,"Gravity turn finished").
+      SET gtf TO true.
+    }
+
+    IF srbf = true AND gtf = true {
+      SET mode TO 2.
+    }
+  }
+
+  // wait for orbit
+  IF mode = 2 {
+    IF SHIP:PERIAPSIS > 90000 AND SHIP:APOAPSIS > 90000 {
+      OUTPUT (GREEN,"In orbit").
+      LOCK THROTTLE TO 0.
+      SET mode TO 3.
+    }
+  }
+
+  // clean up orbit
+  IF mode = 3 {
+    LOCAL deltaV IS ship:facing:vector:normalized.
+    LOCAL timeout IS time:seconds + 9000.
+    LOCK steering TO lookdirup(deltaV, ship:facing:topvector).
+    SET th TO 0.
+
+    UNTIL deltaV:mag < 0.2 OR time:seconds > timeout {
+      SET vecNormal TO vcrs(UP:vector,velocity:orbit).
+      SET vecHorizontal TO -1 * vcrs(UP:vector, vecNormal).
+      SET vecHorizontal:mag TO sqrt(BODY:MU/(BODY:Radius + altitude)).
+      SET deltaV TO vecHorizontal - VELOCITY:orbit.
+
+      IF vang(SHIP:facing:vector,deltaV) > 1 {
+        LOCK throttle TO 0.
+      } ELSE {
+        LOCK throttle TO max(0,min(1,deltaV:mag/10)).
+      }
+    }
+    LOCK steering TO lookdirup(PROGRADE:vector, SHIP:facing:topvector).
+    OUTPUT (GREEN,"Orbit is clean").
+    SET mode TO 4.
+  }
+
+  // in-orbit
+  IF mode = 4 {
+    WAIT 100.
+    SET mode TO 5.
+  }
+
+  // de-orbit
+  IF mode = 5 {
+    LOCK steering TO lookdirup(SRFRETROGRADE:vector, SHIP:facing:topvector).
+    WAIT 10.
+    LOCK throttle TO 1.
+
+    IF STAGE:LIQUIDFUEL < 0.1 OR SHIP:PERIAPSIS < 20000 {
+      LOCK throttle TO 0.
+      WAIT 1.
+      OUTPUT(GREEN,"ME Seperation").
+      STAGE.
+      WAIT 3.
+      OUTPUT(GREEN,"Parashoot ready").
+      STAGE.
+      SET mode TO 6.
+    }
+  }
+
+  // Save some power
+  WAIT 0.1.
+}
